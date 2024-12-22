@@ -56,7 +56,7 @@ func main() {
 		),
 	)
 
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		headers := w.Header()
 		headers.Set("Cache-Control", "no-cache")
 		headers.Set("Content-Type", "text/plain; charset=utf-8")
@@ -68,8 +68,8 @@ func main() {
 		}
 	})
 
-	mux.HandleFunc("GET /metrics", apiCfg.hitsSinceLastShutdown)
-	mux.HandleFunc("POST /reset", apiCfg.resetHits)
+	mux.HandleFunc("GET /api/metrics", apiCfg.hitsSinceLastShutdown)
+	mux.HandleFunc("POST /api/reset", apiCfg.resetHits)
 
 	log.Fatal(server.ListenAndServe())
 }
