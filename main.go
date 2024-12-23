@@ -6,7 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 )
 
@@ -56,7 +58,7 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type JsonResponse struct {
-		Valid bool `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
 	}
 
 	type ErrorResponse struct {
@@ -104,8 +106,17 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	words := strings.Split(input.Body, " ")
+	profanity := []string{"kerfuffle", "sharbert", "fornax"}
+	for i, word := range words {
+		normalized := strings.ToLower(word)
+		if slices.Contains(profanity, normalized) {
+			words[i] = "****"
+		}
+	}
+
 	bytes, err := json.Marshal(JsonResponse{
-		Valid: true,
+		CleanedBody: strings.Join(words, " "),
 	})
 	if err != nil {
 		log.Printf("Unable to encode static valid input response")
