@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -49,6 +50,74 @@ func (c *apiConfig) resetHits(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func validateChirp(w http.ResponseWriter, r *http.Request) {
+	type UnvalidatedInput struct {
+		Body string `json:"body"`
+	}
+
+	type JsonResponse struct {
+		Valid bool `json:"valid"`
+	}
+
+	type ErrorResponse struct {
+		Error string `json:"error"`
+	}
+
+	headers := w.Header()
+	decoder := json.NewDecoder(r.Body)
+
+	input := UnvalidatedInput{}
+	err := decoder.Decode(&input)
+	if err != nil {
+		bytes, err := json.Marshal(ErrorResponse{
+			Error: "Unable to decode input",
+		})
+		if err != nil {
+			log.Printf("Unable to encode static error response")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusBadRequest)
+		headers.Set("Content-Type", "application/json")
+		w.Write(bytes)
+		return
+	}
+
+	// I hate that I have to do this, but this is Boot.dev instructs you to do.
+	// Rather than just treat an invalid input as something that produces a
+	// false value, you just treat it as an error instead??? It not only makes
+	// the code longer, but also makes the behavior more unintuitive for users??
+	if len(input.Body) > 140 {
+		bytes, err := json.Marshal(ErrorResponse{
+			Error: "Chirp is too long",
+		})
+		if err != nil {
+			log.Printf("Unable to encode static error response")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusBadRequest)
+		headers.Set("Content-Type", "application/json")
+		w.Write(bytes)
+		return
+	}
+
+	bytes, err := json.Marshal(JsonResponse{
+		Valid: true,
+	})
+	if err != nil {
+		log.Printf("Unable to encode static valid input response")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	headers.Set("Content-Type", "application/json")
+	w.Write(bytes)
+}
+
 func main() {
 	mux := http.NewServeMux()
 	server := http.Server{
@@ -67,6 +136,7 @@ func main() {
 		),
 	)
 
+	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		headers := w.Header()
 		headers.Set("Cache-Control", "no-cache")
