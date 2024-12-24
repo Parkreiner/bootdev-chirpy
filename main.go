@@ -265,7 +265,56 @@ func (c *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-func (c *apiConfig) AllChirps(w http.ResponseWriter, r *http.Request) {
+func (c *apiConfig) GetChirp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("chirpId")
+	if id == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		log.Printf(
+			"Unable to convert user-provided ID %s into ID. Error: %v\n",
+			id,
+			err,
+		)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	chirp, err := c.queries.GetChirp(r.Context(), parsed)
+	if err == sql.ErrNoRows {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("Unable to retrieve chirp for ID %s. Error: %v\n", parsed, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	resChirp := ChirpResponse{
+		Id:        chirp.ID,
+		Body:      chirp.Body,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		UserId:    chirp.UserID,
+	}
+	bytes, err := json.Marshal(resChirp)
+	if err != nil {
+		log.Printf("Unable to marshal chirp %v. Error %v\n", resChirp, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	headers := w.Header()
+	headers.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(bytes)
+}
+
+func (c *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
 	dbChirps, err := c.queries.GetAllChirps(r.Context())
 	if err != nil {
 		log.Printf("Unable to get all chirps: error %v\n", err)
@@ -346,7 +395,8 @@ func main() {
 
 	// Routes accessible to all users
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
-	mux.HandleFunc("GET /api/chirps", apiCfg.AllChirps)
+	mux.HandleFunc("GET /api/chirps", apiCfg.GetAllChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpId}", apiCfg.GetChirp)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/healthz", healthStats)
 
