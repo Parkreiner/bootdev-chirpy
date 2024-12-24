@@ -27,6 +27,44 @@ type apiConfig struct {
 	queries        *database.Queries
 }
 
+func processDecodingError(
+	writer http.ResponseWriter,
+	err error,
+	clientErrorMessage string,
+) {
+	type ErrorResponse struct {
+		Error string `json:"error"`
+	}
+
+	log.Print(err)
+	bytes, err := json.Marshal(ErrorResponse{
+		Error: clientErrorMessage,
+	})
+	if err != nil {
+		log.Printf("Unable to encode static error response")
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	writer.WriteHeader(http.StatusBadRequest)
+	headers := writer.Header()
+	headers.Set("Content-Type", "application/json")
+	writer.Write(bytes)
+}
+
+func removeProfanity(input string) string {
+	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
+	words := strings.Split(input, " ")
+	for i, word := range words {
+		normalized := strings.ToLower(word)
+		if slices.Contains(profaneWords, normalized) {
+			words[i] = "****"
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
 func (c *apiConfig) middlewareIncrementHitsOnVisit(
 	next http.Handler,
 ) http.Handler {
@@ -70,86 +108,15 @@ func (c *apiConfig) resetAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only reset hits if we know we were able to delete the users
-	c.fileserverHits.Store(0)
-	w.WriteHeader(http.StatusOK)
-}
-
-func validateChirp(w http.ResponseWriter, r *http.Request) {
-	type UnvalidatedInput struct {
-		Body string `json:"body"`
-	}
-
-	type JsonResponse struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
-
-	type ErrorResponse struct {
-		Error string `json:"error"`
-	}
-
-	headers := w.Header()
-	decoder := json.NewDecoder(r.Body)
-
-	input := UnvalidatedInput{}
-	err := decoder.Decode(&input)
+	err = c.queries.DeleteAllChirps(r.Context())
 	if err != nil {
-		bytes, err := json.Marshal(ErrorResponse{
-			Error: "Unable to decode input",
-		})
-		if err != nil {
-			log.Printf("Unable to encode static error response")
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusBadRequest)
-		headers.Set("Content-Type", "application/json")
-		w.Write(bytes)
-		return
-	}
-
-	// I hate that I have to do this, but this is Boot.dev instructs you to do.
-	// Rather than just treat an invalid input as something that produces a
-	// false value, you just treat it as an error instead??? It not only makes
-	// the code longer, but also makes the behavior more unintuitive for users??
-	if len(input.Body) > 140 {
-		bytes, err := json.Marshal(ErrorResponse{
-			Error: "Chirp is too long",
-		})
-		if err != nil {
-			log.Printf("Unable to encode static error response")
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusBadRequest)
-		headers.Set("Content-Type", "application/json")
-		w.Write(bytes)
-		return
-	}
-
-	words := strings.Split(input.Body, " ")
-	profanity := []string{"kerfuffle", "sharbert", "fornax"}
-	for i, word := range words {
-		normalized := strings.ToLower(word)
-		if slices.Contains(profanity, normalized) {
-			words[i] = "****"
-		}
-	}
-
-	bytes, err := json.Marshal(JsonResponse{
-		CleanedBody: strings.Join(words, " "),
-	})
-	if err != nil {
-		log.Printf("Unable to encode static valid input response")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
+	// Only reset hits if we know we were able to delete the users
+	c.fileserverHits.Store(0)
 	w.WriteHeader(http.StatusOK)
-	headers.Set("Content-Type", "application/json")
-	w.Write(bytes)
 }
 
 func healthStats(w http.ResponseWriter, _ *http.Request) {
@@ -182,7 +149,7 @@ func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	payload := createUserJson{}
 	err := decoder.Decode(&payload)
 	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		processDecodingError(w, err, "Request payload is invalid")
 		return
 	}
 
@@ -204,6 +171,94 @@ func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	headers := w.Header()
+	headers.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	w.Write(bytes)
+}
+
+func (c *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
+	type chirpPayload struct {
+		Body   string    `json:"body"`
+		UserId uuid.UUID `json:"user_id"`
+	}
+
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+
+	headers := w.Header()
+	decoder := json.NewDecoder(r.Body)
+	payload := chirpPayload{}
+
+	err := decoder.Decode(&payload)
+	if err != nil {
+		processDecodingError(w, err, "Request payload is invalid")
+		return
+	}
+
+	if len(payload.Body) > 140 {
+		bytes, err := json.Marshal(errorResponse{
+			Error: "Chirp is too long",
+		})
+		if err != nil {
+			log.Printf("Unable to encode static error response")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusBadRequest)
+		headers.Set("Content-Type", "application/json")
+		w.Write(bytes)
+		return
+	}
+
+	if payload.Body == "" {
+		bytes, err := json.Marshal(errorResponse{
+			Error: "Chirp is empty",
+		})
+		if err != nil {
+			log.Printf("Unable to encode static error response")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusBadRequest)
+		headers.Set("Content-Type", "application/json")
+		w.Write(bytes)
+		return
+	}
+
+	dbChirp, err := c.queries.CreateChirp(
+		r.Context(),
+		database.CreateChirpParams{
+			UserID: payload.UserId,
+			Body:   removeProfanity(payload.Body),
+		},
+	)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	type CreatedChirpResponse struct {
+		Id        uuid.UUID `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Body      string    `json:"body"`
+		UserId    uuid.UUID `json:"user_id"`
+	}
+	bytes, err := json.Marshal(CreatedChirpResponse{
+		Id:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserId:    dbChirp.UserID,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	headers.Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	w.Write(bytes)
@@ -254,7 +309,7 @@ func main() {
 
 	// Routes accessible to all users
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
-	mux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/healthz", healthStats)
 
 	// Admin-only routes
