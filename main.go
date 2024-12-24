@@ -27,6 +27,14 @@ type apiConfig struct {
 	queries        *database.Queries
 }
 
+type ChirpResponse struct {
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Id        uuid.UUID `json:"id"`
+	Body      string    `json:"body"`
+	UserId    uuid.UUID `json:"user_id"`
+}
+
 func processDecodingError(
 	writer http.ResponseWriter,
 	err error,
@@ -240,14 +248,7 @@ func (c *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type CreatedChirpResponse struct {
-		Id        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Body      string    `json:"body"`
-		UserId    uuid.UUID `json:"user_id"`
-	}
-	bytes, err := json.Marshal(CreatedChirpResponse{
+	bytes, err := json.Marshal(ChirpResponse{
 		Id:        dbChirp.ID,
 		CreatedAt: dbChirp.CreatedAt,
 		UpdatedAt: dbChirp.UpdatedAt,
@@ -261,6 +262,42 @@ func (c *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 
 	headers.Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	w.Write(bytes)
+}
+
+func (c *apiConfig) AllChirps(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := c.queries.GetAllChirps(r.Context())
+	if err != nil {
+		log.Printf("Unable to get all chirps: error %v\n", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	responseChirps := make([]ChirpResponse, 0, len(dbChirps))
+	for _, chirp := range dbChirps {
+		responseChirps = append(responseChirps, ChirpResponse{
+			Id:        chirp.ID,
+			Body:      chirp.Body,
+			UserId:    chirp.UserID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+		})
+	}
+
+	bytes, err := json.Marshal(responseChirps)
+	if err != nil {
+		log.Printf(
+			"Unable to serialize chirps %v. Error: %v",
+			responseChirps,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	headers := w.Header()
+	headers.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	w.Write(bytes)
 }
 
@@ -309,6 +346,7 @@ func main() {
 
 	// Routes accessible to all users
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+	mux.HandleFunc("GET /api/chirps", apiCfg.AllChirps)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/healthz", healthStats)
 
