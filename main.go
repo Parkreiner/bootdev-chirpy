@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,15 +11,22 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com.com/Parkreiner/bootdev-chirpy/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 const portNumber = 8080
 
 type apiConfig struct {
 	fileserverHits atomic.Uint32
+	queries        *database.Queries
 }
 
-func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+func (c *apiConfig) middlewareIncrementHitsOnVisit(
+	next http.Handler,
+) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.fileserverHits.Add(1)
 		next.ServeHTTP(w, r)
@@ -130,18 +138,33 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	err := godotenv.Load("./.env")
+	if err != nil {
+		log.Fatal("Unable to load .env file. Is it present?")
+	}
+	dbUrl := os.Getenv("DB_URL")
+	if dbUrl == "" {
+		log.Fatal("Missing DB_URL environment variable")
+	}
+	dbInstance, err := sql.Open("postgres", dbUrl)
+	if err != nil {
+		log.Fatalf("Error instantiating database with URL %s", dbUrl)
+	}
+	apiCfg := apiConfig{
+		queries: database.New(dbInstance),
+	}
+
 	mux := http.NewServeMux()
 	server := http.Server{
 		Addr:    ":" + strconv.Itoa(portNumber),
 		Handler: mux,
 	}
 
-	apiCfg := apiConfig{}
 	mux.Handle(
 		"GET /app/",
 		http.StripPrefix(
 			"/app",
-			apiCfg.middlewareMetricsInc(
+			apiCfg.middlewareIncrementHitsOnVisit(
 				http.FileServer(http.Dir(".")),
 			),
 		),
