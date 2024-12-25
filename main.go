@@ -15,6 +15,7 @@ import (
 
 	"github.com.com/Parkreiner/bootdev-chirpy/internal/auth"
 	"github.com.com/Parkreiner/bootdev-chirpy/internal/database"
+	"github.com.com/Parkreiner/bootdev-chirpy/internal/secret"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -26,6 +27,7 @@ type apiConfig struct {
 	fileserverHits atomic.Uint32
 	isProduction   bool
 	queries        *database.Queries
+	jwtSecret      secret.Secret[string]
 }
 
 type UserCredentials struct {
@@ -33,11 +35,23 @@ type UserCredentials struct {
 	Password string `json:"password"`
 }
 
-type SecureUserResponse struct {
+type LoginCredentials struct {
+	UserCredentials
+	// Value cannot be negative, but using signed int for better ergonomics with
+	// Go core library
+	ExpiresInSeconds int `json:"expires_in_seconds,omitempty"`
+}
+
+type UserResponse struct {
 	Id        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+}
+
+type UserResponseWithToken struct {
+	UserResponse
+	Token string `json:"token"`
 }
 
 type ChirpResponse struct {
@@ -140,21 +154,8 @@ func (c *apiConfig) resetAll(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func healthStats(w http.ResponseWriter, _ *http.Request) {
-	_, err := w.Write([]byte("OK"))
-	if err != nil {
-		log.Printf("Unable to write response to header. Error: %v\n", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	headers := w.Header()
-	headers.Set("Cache-Control", "no-cache")
-	headers.Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-}
-
 func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
+	log.Println("Creating new user")
 	decoder := json.NewDecoder(r.Body)
 	payload := UserCredentials{}
 	err := decoder.Decode(&payload)
@@ -174,11 +175,26 @@ func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		HashedPassword: hashed,
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key value") {
+			log.Printf(
+				"Cannot create user for email '%s'; email already exists\n",
+				payload.Email,
+			)
+			w.WriteHeader(400)
+			return
+		}
+
+		log.Printf(
+			"Unable to create user for email '%s' and password '%s'. Error: %v\n",
+			payload.Email,
+			payload.Password,
+			err,
+		)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	bytes, err := json.Marshal(SecureUserResponse{
+	bytes, err := json.Marshal(UserResponse{
 		Id:        newDbUser.ID,
 		CreatedAt: newDbUser.CreatedAt,
 		UpdatedAt: newDbUser.UpdatedAt,
@@ -197,19 +213,31 @@ func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 
 func (c *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	type chirpPayload struct {
-		Body   string    `json:"body"`
-		UserId uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	type errorResponse struct {
 		Error string `json:"error"`
 	}
 
+	token, err := auth.GetBearerToken(&r.Header)
+	if err != nil {
+		log.Println("Bearer token is missing or invalid")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	userId, err := auth.ValidateJwt(token, c.jwtSecret)
+	if err != nil {
+		log.Printf("Unable to validate token '%s'.\nError: %v\n", token, err)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	headers := w.Header()
 	decoder := json.NewDecoder(r.Body)
 	payload := chirpPayload{}
 
-	err := decoder.Decode(&payload)
+	err = decoder.Decode(&payload)
 	if err != nil {
 		processDecodingError(w, err, "Request payload is invalid")
 		return
@@ -250,7 +278,7 @@ func (c *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 	dbChirp, err := c.queries.CreateChirp(
 		r.Context(),
 		database.CreateChirpParams{
-			UserID: payload.UserId,
+			UserID: userId,
 			Body:   removeProfanity(payload.Body),
 		},
 	)
@@ -363,11 +391,14 @@ func (c *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
 
 func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
-	payload := UserCredentials{}
+	payload := LoginCredentials{}
 	err := decoder.Decode(&payload)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
+	}
+	if payload.ExpiresInSeconds <= 0 || payload.ExpiresInSeconds > 360 {
+		payload.ExpiresInSeconds = 360
 	}
 
 	dbUser, err := c.queries.GetUserByEmail(r.Context(), payload.Email)
@@ -391,11 +422,29 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bytes, err := json.Marshal(SecureUserResponse{
-		Id:        dbUser.ID,
-		UpdatedAt: dbUser.UpdatedAt,
-		CreatedAt: dbUser.CreatedAt,
-		Email:     dbUser.Email,
+	token, err := auth.MakeJWT(
+		dbUser.ID,
+		c.jwtSecret,
+		time.Duration(int(time.Hour)*payload.ExpiresInSeconds),
+	)
+	if err != nil {
+		log.Printf(
+			"Unable to produce new JWT for user ID '%s'. Error: %v\n",
+			dbUser.ID,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	bytes, err := json.Marshal(UserResponseWithToken{
+		Token: token,
+		UserResponse: UserResponse{
+			Id:        dbUser.ID,
+			UpdatedAt: dbUser.UpdatedAt,
+			CreatedAt: dbUser.CreatedAt,
+			Email:     dbUser.Email,
+		},
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -408,6 +457,20 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
+func healthStats(w http.ResponseWriter, _ *http.Request) {
+	_, err := w.Write([]byte("OK"))
+	if err != nil {
+		log.Printf("Unable to write response to header. Error: %v\n", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	headers := w.Header()
+	headers.Set("Cache-Control", "no-cache")
+	headers.Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+}
+
 func main() {
 	// Load all required env variables
 	err := godotenv.Load("./.env")
@@ -417,6 +480,10 @@ func main() {
 	dbUrl := os.Getenv("DB_URL")
 	if dbUrl == "" {
 		log.Fatal("Missing DB_URL environment variable")
+	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("Missing JWT secret")
 	}
 	isProduction := os.Getenv("PLATFORM") != "dev"
 
@@ -429,8 +496,10 @@ func main() {
 	// Initialize "global" config (which is passed implicitly by using its
 	// methods as route handlers)
 	apiCfg := apiConfig{
-		queries:      database.New(dbInstance),
-		isProduction: isProduction,
+		queries:        database.New(dbInstance),
+		isProduction:   isProduction,
+		fileserverHits: atomic.Uint32{},
+		jwtSecret:      secret.New(jwtSecret),
 	}
 
 	// Set up server multiplexer
