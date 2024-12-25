@@ -16,7 +16,6 @@ const jwtIssuer = "chirpy"
 func MakeJWT(
 	userId uuid.UUID,
 	tokenSecret secret.Secret[string],
-	expiresIn time.Duration,
 ) (string, error) {
 	now := time.Now().UTC()
 	unsignedToken := jwt.NewWithClaims(
@@ -25,7 +24,7 @@ func MakeJWT(
 			Issuer:    jwtIssuer,
 			Subject:   userId.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(expiresIn)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 		},
 	)
 
@@ -52,7 +51,7 @@ func ValidateJwt(
 		},
 	)
 	if err != nil {
-		log.Print("-----", parsed.Claims, "\n\n")
+		log.Print(err)
 		return uuid.UUID{}, err
 	}
 	if !parsed.Valid {

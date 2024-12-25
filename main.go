@@ -35,13 +35,6 @@ type UserCredentials struct {
 	Password string `json:"password"`
 }
 
-type LoginCredentials struct {
-	UserCredentials
-	// Value cannot be negative, but using signed int for better ergonomics with
-	// Go core library
-	ExpiresInSeconds int `json:"expires_in_seconds,omitempty"`
-}
-
 type UserResponse struct {
 	Id        uuid.UUID `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -49,9 +42,10 @@ type UserResponse struct {
 	Email     string    `json:"email"`
 }
 
-type UserResponseWithToken struct {
+type UserResponseWithTokens struct {
 	UserResponse
-	Token string `json:"token"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
 }
 
 type ChirpResponse struct {
@@ -100,6 +94,20 @@ func removeProfanity(input string) string {
 	return strings.Join(words, " ")
 }
 
+func healthStats(w http.ResponseWriter, _ *http.Request) {
+	_, err := w.Write([]byte("OK"))
+	if err != nil {
+		log.Printf("Unable to write response to header. Error: %v\n", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	headers := w.Header()
+	headers.Set("Cache-Control", "no-cache")
+	headers.Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+}
+
 func (c *apiConfig) middlewareIncrementHitsOnVisit(
 	next http.Handler,
 ) http.Handler {
@@ -139,12 +147,21 @@ func (c *apiConfig) resetAll(w http.ResponseWriter, r *http.Request) {
 
 	err := c.queries.DeleteAllUsers(r.Context())
 	if err != nil {
+		log.Println("Failed to delete all users")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	err = c.queries.DeleteAllChirps(r.Context())
 	if err != nil {
+		log.Println("Failed to delete all chirps")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err = c.queries.DeleteAllRefreshTokens(r.Context())
+	if err != nil {
+		log.Println("Failed to delete all refresh tokens")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -220,15 +237,15 @@ func (c *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
 		Error string `json:"error"`
 	}
 
-	token, err := auth.GetBearerToken(&r.Header)
+	accessToken, err := auth.GetBearerToken(&r.Header)
 	if err != nil {
 		log.Println("Bearer token is missing or invalid")
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	userId, err := auth.ValidateJwt(token, c.jwtSecret)
+	userId, err := auth.ValidateJwt(accessToken, c.jwtSecret)
 	if err != nil {
-		log.Printf("Unable to validate token '%s'.\nError: %v\n", token, err)
+		log.Printf("Unable to validate token '%s'.\nError: %v\n", accessToken, err)
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -391,14 +408,11 @@ func (c *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
 
 func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
-	payload := LoginCredentials{}
+	payload := UserCredentials{}
 	err := decoder.Decode(&payload)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
-	}
-	if payload.ExpiresInSeconds <= 0 || payload.ExpiresInSeconds > 360 {
-		payload.ExpiresInSeconds = 360
 	}
 
 	dbUser, err := c.queries.GetUserByEmail(r.Context(), payload.Email)
@@ -422,11 +436,7 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.MakeJWT(
-		dbUser.ID,
-		c.jwtSecret,
-		time.Duration(int(time.Hour)*payload.ExpiresInSeconds),
-	)
+	accessToken, err := auth.MakeJWT(dbUser.ID, c.jwtSecret)
 	if err != nil {
 		log.Printf(
 			"Unable to produce new JWT for user ID '%s'. Error: %v\n",
@@ -437,8 +447,28 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bytes, err := json.Marshal(UserResponseWithToken{
-		Token: token,
+	refreshPayload, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("Unable to generate refresh token. Error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	refreshTokenEntry, err := c.queries.CreateNewRefreshToken(
+		r.Context(),
+		database.CreateNewRefreshTokenParams{
+			Token:  refreshPayload,
+			UserID: dbUser.ID,
+		},
+	)
+	if err != nil {
+		log.Printf("Unable to write refresh token to database. Error: %v\n", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	bytes, err := json.Marshal(UserResponseWithTokens{
+		Token:        accessToken,
+		RefreshToken: refreshTokenEntry.Token,
 		UserResponse: UserResponse{
 			Id:        dbUser.ID,
 			UpdatedAt: dbUser.UpdatedAt,
@@ -457,18 +487,116 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-func healthStats(w http.ResponseWriter, _ *http.Request) {
-	_, err := w.Write([]byte("OK"))
+func (c *apiConfig) RefreshAccessToken(w http.ResponseWriter, r *http.Request) {
+	type RefreshAccessTokenResponse struct {
+		Token string `json:"token"`
+	}
+
+	refreshToken, err := auth.GetBearerToken(&r.Header)
 	if err != nil {
-		log.Printf("Unable to write response to header. Error: %v\n", err)
+		log.Println("Missing bearer token")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	dbRefreshToken, err := c.queries.GetRefreshToken(r.Context(), refreshToken)
+	if err == sql.ErrNoRows {
+		log.Printf("No token found for %s.\nError: %v\n", refreshToken, err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		log.Printf(
+			"Unable to complete query for token %s.\nError: %v\n",
+			refreshToken,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	tokenIsAlreadyRevoked := dbRefreshToken.RevokedAt.Valid
+	if tokenIsAlreadyRevoked {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	tokenIsExpired := time.Now().After(dbRefreshToken.ExpiresAt)
+	if tokenIsExpired {
+		log.Printf("Token %s is expired\n", refreshToken)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// If we can't find a user when we already have a refresh token entry,
+	// that's a very good sign that there's something wrong with our database;
+	// no need to treat lack of results as special exception case
+	user, err := c.queries.GetUserById(r.Context(), dbRefreshToken.UserID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	newAccessToken, err := auth.MakeJWT(user.ID, c.jwtSecret)
+	if err != nil {
+		log.Printf("Unable to generate new JWT for user ID %s\n", user.ID)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	bytes, err := json.Marshal(RefreshAccessTokenResponse{
+		Token: newAccessToken,
+	})
+	if err != nil {
+		log.Printf("Unable to serialize token into JSON. Error: %v\n", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	headers := w.Header()
-	headers.Set("Cache-Control", "no-cache")
-	headers.Set("Content-Type", "text/plain; charset=utf-8")
+	headers.Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	w.Write(bytes)
+}
+
+func (c *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(&r.Header)
+	if err != nil {
+		log.Println("Missing bearer token")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	dbToken, err := c.queries.GetRefreshToken(r.Context(), refreshToken)
+	if err == sql.ErrNoRows {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		log.Printf(
+			"Unable to match token to database record. Token: %s\nError: %v\n",
+			refreshToken,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	tokenAlreadyRevoked := dbToken.RevokedAt.Valid
+	if tokenAlreadyRevoked {
+		log.Printf(
+			"Trying to revoke token that was revoked at %s. Token: %s\n",
+			dbToken.RevokedAt.Time,
+			dbToken.Token,
+		)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	err = c.queries.RevokeRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		log.Printf("Unable to revoke token %s.\nError: %v\n", refreshToken, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func main() {
@@ -527,6 +655,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps/{chirpId}", apiCfg.GetChirp)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
 	mux.HandleFunc("GET /api/healthz", healthStats)
+	mux.HandleFunc("POST /api/refresh", apiCfg.RefreshAccessToken)
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
 
 	// Admin-only routes
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetAll)
