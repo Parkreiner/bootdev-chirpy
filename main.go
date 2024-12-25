@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com.com/Parkreiner/bootdev-chirpy/internal/auth"
 	"github.com.com/Parkreiner/bootdev-chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -25,6 +26,18 @@ type apiConfig struct {
 	fileserverHits atomic.Uint32
 	isProduction   bool
 	queries        *database.Queries
+}
+
+type UserCredentials struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type SecureUserResponse struct {
+	Id        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
 }
 
 type ChirpResponse struct {
@@ -142,32 +155,30 @@ func healthStats(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
-	type createUserJson struct {
-		Email string `json:"email"`
-	}
-
-	type createdUserResponse struct {
-		Id        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-	}
-
 	decoder := json.NewDecoder(r.Body)
-	payload := createUserJson{}
+	payload := UserCredentials{}
 	err := decoder.Decode(&payload)
 	if err != nil {
 		processDecodingError(w, err, "Request payload is invalid")
 		return
 	}
 
-	newDbUser, err := c.queries.CreateUser(r.Context(), payload.Email)
+	hashed, err := auth.HashPassword(payload.Password)
+	if err != nil {
+		log.Printf("Unable to hash password %s. Error: %v", payload.Password, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	newDbUser, err := c.queries.CreateUser(r.Context(), database.CreateUserParams{
+		Email:          payload.Email,
+		HashedPassword: hashed,
+	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	bytes, err := json.Marshal(createdUserResponse{
+	bytes, err := json.Marshal(SecureUserResponse{
 		Id:        newDbUser.ID,
 		CreatedAt: newDbUser.CreatedAt,
 		UpdatedAt: newDbUser.UpdatedAt,
@@ -350,6 +361,53 @@ func (c *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
+func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	payload := UserCredentials{}
+	err := decoder.Decode(&payload)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	dbUser, err := c.queries.GetUserByEmail(r.Context(), payload.Email)
+	if err == sql.ErrNoRows {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		log.Printf(
+			"Error getting user from database for email %s. Error: %v",
+			payload.Email,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err = auth.CheckPasswordHash(payload.Password, dbUser.HashedPassword)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	bytes, err := json.Marshal(SecureUserResponse{
+		Id:        dbUser.ID,
+		UpdatedAt: dbUser.UpdatedAt,
+		CreatedAt: dbUser.CreatedAt,
+		Email:     dbUser.Email,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	headers := w.Header()
+	headers.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(bytes)
+}
+
 func main() {
 	// Load all required env variables
 	err := godotenv.Load("./.env")
@@ -394,6 +452,7 @@ func main() {
 	)
 
 	// Routes accessible to all users
+	mux.HandleFunc("POST /api/login", apiCfg.login)
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 	mux.HandleFunc("GET /api/chirps", apiCfg.GetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", apiCfg.GetChirp)
