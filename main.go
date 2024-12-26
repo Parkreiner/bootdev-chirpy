@@ -679,6 +679,55 @@ func (c *apiConfig) updateLoginCredentials(
 	w.Write(bytes)
 }
 
+func (c *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
+	chirpId := r.PathValue("chirpId")
+	chirpUuid, err := uuid.Parse(chirpId)
+	if err != nil {
+		log.Printf("Unable to parse ID %s.\nError %v\n", chirpId, err)
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	accessToken, err := auth.GetBearerToken(&r.Header)
+	if err != nil {
+		log.Println("Bearer for access token is missing")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	userId, err := auth.ValidateJwt(accessToken, c.jwtSecret)
+	if err != nil {
+		log.Printf("Unable to parse token %s.\nError %v\n", accessToken, err)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	deletedChirp, err := c.queries.DeleteChirp(
+		r.Context(),
+		database.DeleteChirpParams{
+			ID:     chirpUuid,
+			UserID: userId,
+		},
+	)
+	if err == sql.ErrNoRows {
+		log.Printf("Chirp ID %s not found in database\n", chirpUuid)
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if err != nil {
+		log.Printf(
+			"Unable to delete chirp for chirp ID %s and user ID %s.\nError: %v\n",
+			chirpUuid,
+			userId,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Deleted chirp %s. Chirp body: %v\n", chirpUuid, deletedChirp)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	// Load all required env variables
 	err := godotenv.Load("./.env")
@@ -728,16 +777,19 @@ func main() {
 		),
 	)
 
-	// Routes accessible to all users
-	mux.HandleFunc("POST /api/login", apiCfg.login)
+	// Routes for specific resources in the app's domain
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
 	mux.HandleFunc("PUT /api/users", apiCfg.updateLoginCredentials)
 	mux.HandleFunc("GET /api/chirps", apiCfg.GetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", apiCfg.GetChirp)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)
-	mux.HandleFunc("GET /api/healthz", healthStats)
+	mux.HandleFunc("DELETE /api/chirps/{chirpId}", apiCfg.deleteChirp)
+
+	// Non-specific routes
+	mux.HandleFunc("POST /api/login", apiCfg.login)
 	mux.HandleFunc("POST /api/refresh", apiCfg.RefreshAccessToken)
 	mux.HandleFunc("POST /api/revoke", apiCfg.revokeRefreshToken)
+	mux.HandleFunc("GET /api/healthz", healthStats)
 
 	// Admin-only routes
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetAll)

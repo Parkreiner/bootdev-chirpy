@@ -25,6 +25,11 @@ VALUES (
 )
 RETURNING *;
 
+-- name: DeleteChirp :one
+DELETE FROM chirps
+WHERE id = $1 AND user_id = $2
+RETURNING *;
+
 -- name: DeleteAllChirps :exec
 DELETE FROM chirps
 RETURNING *;
