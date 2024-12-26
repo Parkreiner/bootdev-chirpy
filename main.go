@@ -599,6 +599,86 @@ func (c *apiConfig) revokeRefreshToken(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (c *apiConfig) updateLoginCredentials(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	accessToken, err := auth.GetBearerToken(&r.Header)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	userId, err := auth.ValidateJwt(accessToken, c.jwtSecret)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	cred := UserCredentials{}
+	err = decoder.Decode(&cred)
+	if err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if cred.Email == "" || cred.Password == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	hashed, err := auth.HashPassword(cred.Password)
+	if err != nil {
+		log.Printf("Unable to hash password %s. Error: %v\n", cred.Password, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	updatedUser, err := c.queries.UpdateLoginCredentials(
+		r.Context(),
+		database.UpdateLoginCredentialsParams{
+			ID:             userId,
+			Email:          cred.Email,
+			HashedPassword: hashed,
+		},
+	)
+	if err != nil {
+		log.Printf(
+			"Unable to update login credentials for user ID %s.\nNew email: %s.\nNew password: %s\nError: %v",
+			userId,
+			cred.Email,
+			cred.Password,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	bytes, err := json.Marshal(UserResponse{
+		Id:        updatedUser.ID,
+		Email:     updatedUser.Email,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+	})
+	if err != nil {
+		log.Printf(
+			"unable to serialize database response into JSON for user %s. Error: %v\n",
+			updatedUser.ID,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	headers := w.Header()
+	headers.Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(bytes)
+}
+
 func main() {
 	// Load all required env variables
 	err := godotenv.Load("./.env")
@@ -651,6 +731,7 @@ func main() {
 	// Routes accessible to all users
 	mux.HandleFunc("POST /api/login", apiCfg.login)
 	mux.HandleFunc("POST /api/users", apiCfg.createUser)
+	mux.HandleFunc("PUT /api/users", apiCfg.updateLoginCredentials)
 	mux.HandleFunc("GET /api/chirps", apiCfg.GetAllChirps)
 	mux.HandleFunc("GET /api/chirps/{chirpId}", apiCfg.GetChirp)
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirp)

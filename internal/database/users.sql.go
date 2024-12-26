@@ -102,3 +102,41 @@ func (q *Queries) GetUserById(ctx context.Context, id uuid.UUID) (User, error) {
 	)
 	return i, err
 }
+
+const updateLoginCredentials = `-- name: UpdateLoginCredentials :one
+UPDATE users
+SET
+    email = $1,
+    hashed_password = $2
+WHERE id = $3
+RETURNING
+    id,
+    created_at,
+    updated_at,
+    email
+`
+
+type UpdateLoginCredentialsParams struct {
+	Email          string
+	HashedPassword string
+	ID             uuid.UUID
+}
+
+type UpdateLoginCredentialsRow struct {
+	ID        uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Email     string
+}
+
+func (q *Queries) UpdateLoginCredentials(ctx context.Context, arg UpdateLoginCredentialsParams) (UpdateLoginCredentialsRow, error) {
+	row := q.db.QueryRowContext(ctx, updateLoginCredentials, arg.Email, arg.HashedPassword, arg.ID)
+	var i UpdateLoginCredentialsRow
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Email,
+	)
+	return i, err
+}
