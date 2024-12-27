@@ -378,11 +378,34 @@ func (c *apiConfig) GetChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
-	dbChirps, err := c.queries.GetAllChirps(r.Context())
-	if err != nil {
-		log.Printf("Unable to get all chirps: error %v\n", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	rawAuthorId := r.URL.Query().Get("author_id")
+	var dbChirps []database.Chirp
+	if rawAuthorId != "" {
+		authorId, err := uuid.Parse(rawAuthorId)
+		if err != nil {
+			log.Printf("Unable to parse author ID %s. Error: %v\n", authorId, err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		dbChirps, err = c.queries.GetChirpsByAuthor(r.Context(), authorId)
+		if err != nil {
+			log.Printf(
+				"Unable to get database rows for author %s. Error %v\n",
+				authorId,
+				err,
+			)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	} else {
+		chirpsRes, err := c.queries.GetAllChirps(r.Context())
+		if err != nil {
+			log.Printf("Unable to get all chirps: error %v\n", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		dbChirps = chirpsRes
 	}
 
 	responseChirps := make([]ChirpResponse, 0, len(dbChirps))
