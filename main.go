@@ -378,34 +378,46 @@ func (c *apiConfig) GetChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *apiConfig) GetAllChirps(w http.ResponseWriter, r *http.Request) {
-	rawAuthorId := r.URL.Query().Get("author_id")
-	var dbChirps []database.Chirp
+	query := r.URL.Query()
+
+	orderBy := strings.ToUpper(query.Get("sort"))
+	if orderBy != "" && orderBy != "ASC" && orderBy != "DESC" {
+		log.Printf("Request trying to sort by invalid value %s\n", orderBy)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if orderBy == "" {
+		orderBy = "ASC"
+	}
+
+	rawAuthorId := query.Get("author_id")
+	var authorId uuid.UUID
 	if rawAuthorId != "" {
-		authorId, err := uuid.Parse(rawAuthorId)
+		id, err := uuid.Parse(rawAuthorId)
 		if err != nil {
-			log.Printf("Unable to parse author ID %s. Error: %v\n", authorId, err)
+			log.Printf("Unable to parse UUID %s\n", rawAuthorId)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		authorId = id
+	}
 
-		dbChirps, err = c.queries.GetChirpsByAuthor(r.Context(), authorId)
-		if err != nil {
-			log.Printf(
-				"Unable to get database rows for author %s. Error %v\n",
-				authorId,
-				err,
-			)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-	} else {
-		chirpsRes, err := c.queries.GetAllChirps(r.Context())
-		if err != nil {
-			log.Printf("Unable to get all chirps: error %v\n", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		dbChirps = chirpsRes
+	dbChirps, err := c.queries.GetChirps(r.Context(), database.GetChirpsParams{
+		OrderBy: orderBy,
+		UserID: uuid.NullUUID{
+			UUID:  authorId,
+			Valid: rawAuthorId != "",
+		},
+	})
+	if err != nil {
+		log.Printf(
+			"Unable to query chirps. Author ID: '%s'. Sorting method: '%s'. Error: %v\n",
+			rawAuthorId,
+			orderBy,
+			err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	responseChirps := make([]ChirpResponse, 0, len(dbChirps))

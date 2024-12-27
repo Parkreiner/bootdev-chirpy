@@ -3,10 +3,17 @@ SELECT *
 FROM chirps
 WHERE id = $1;
 
--- name: GetAllChirps :many
+-- name: GetChirps :many
 SELECT *
 FROM chirps
-ORDER BY created_at ASC;
+WHERE
+    CASE
+        WHEN sqlc.narg(user_id)::uuid IS NULL THEN true
+        ELSE user_id = sqlc.narg(user_id)::uuid
+    END
+ORDER BY
+    CASE WHEN sqlc.arg(order_by)::text = 'ASC' THEN created_at END ASC,
+    CASE WHEN sqlc.arg(order_by)::text = 'DESC' THEN created_at END DESC;
 
 -- name: GetChirpsByAuthor :many
 SELECT *

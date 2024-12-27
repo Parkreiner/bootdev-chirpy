@@ -81,14 +81,45 @@ func (q *Queries) DeleteChirp(ctx context.Context, arg DeleteChirpParams) (Chirp
 	return i, err
 }
 
-const getAllChirps = `-- name: GetAllChirps :many
+const getChirp = `-- name: GetChirp :one
 SELECT id, created_at, updated_at, body, user_id
 FROM chirps
-ORDER BY created_at ASC
+WHERE id = $1
 `
 
-func (q *Queries) GetAllChirps(ctx context.Context) ([]Chirp, error) {
-	rows, err := q.db.QueryContext(ctx, getAllChirps)
+func (q *Queries) GetChirp(ctx context.Context, id uuid.UUID) (Chirp, error) {
+	row := q.db.QueryRowContext(ctx, getChirp, id)
+	var i Chirp
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Body,
+		&i.UserID,
+	)
+	return i, err
+}
+
+const getChirps = `-- name: GetChirps :many
+SELECT id, created_at, updated_at, body, user_id
+FROM chirps
+WHERE
+    CASE
+        WHEN $1::uuid IS NULL THEN true
+        ELSE user_id = $1::uuid
+    END
+ORDER BY
+    CASE WHEN $2::text = 'ASC' THEN created_at END ASC,
+    CASE WHEN $2::text = 'DESC' THEN created_at END DESC
+`
+
+type GetChirpsParams struct {
+	UserID  uuid.NullUUID
+	OrderBy string
+}
+
+func (q *Queries) GetChirps(ctx context.Context, arg GetChirpsParams) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, getChirps, arg.UserID, arg.OrderBy)
 	if err != nil {
 		return nil, err
 	}
@@ -114,25 +145,6 @@ func (q *Queries) GetAllChirps(ctx context.Context) ([]Chirp, error) {
 		return nil, err
 	}
 	return items, nil
-}
-
-const getChirp = `-- name: GetChirp :one
-SELECT id, created_at, updated_at, body, user_id
-FROM chirps
-WHERE id = $1
-`
-
-func (q *Queries) GetChirp(ctx context.Context, id uuid.UUID) (Chirp, error) {
-	row := q.db.QueryRowContext(ctx, getChirp, id)
-	var i Chirp
-	err := row.Scan(
-		&i.ID,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.Body,
-		&i.UserID,
-	)
-	return i, err
 }
 
 const getChirpsByAuthor = `-- name: GetChirpsByAuthor :many
