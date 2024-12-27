@@ -20,3 +20,17 @@ func GetBearerToken(headers *http.Header) (string, error) {
 
 	return strings.TrimSpace(token), nil
 }
+
+func GetApiKey(headers *http.Header) (string, error) {
+	authHeader := headers.Get("Authorization")
+	if authHeader == "" {
+		return "", errors.New("missing Authorization header")
+	}
+
+	prefix, key, ok := strings.Cut(authHeader, " ")
+	if !ok || prefix != "ApiKey" {
+		return "", errors.New("received API key in unknown format")
+	}
+
+	return key, nil
+}

@@ -23,11 +23,16 @@ import (
 
 const portNumber = 8080
 
+type ApiKeys struct {
+	Polka string
+}
+
 type apiConfig struct {
 	fileserverHits atomic.Uint32
 	isProduction   bool
 	queries        *database.Queries
 	jwtSecret      secret.Secret[string]
+	apiKeys        ApiKeys
 }
 
 type UserCredentials struct {
@@ -745,9 +750,21 @@ func (c *apiConfig) upgradeUserSubscription(
 		Data  PolkaWebhookData `json:"data"`
 	}
 
+	apiKey, err := auth.GetApiKey(&r.Header)
+	if err != nil {
+		log.Printf("Unable to parse API key. Error %v\n", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if apiKey != c.apiKeys.Polka {
+		log.Println("Supplied API key is invalid")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	decoder := json.NewDecoder(r.Body)
 	payload := PolkaWebhookRequest{}
-	err := decoder.Decode(&payload)
+	err = decoder.Decode(&payload)
 	if err != nil {
 		log.Printf("Unable to parse request. Error: %v\n", err)
 		w.WriteHeader(http.StatusBadRequest)
@@ -792,6 +809,11 @@ func main() {
 	if jwtSecret == "" {
 		log.Fatal("Missing JWT secret")
 	}
+	polkaApiKey := os.Getenv("POLKA_API_KEY")
+	if polkaApiKey == "" {
+		log.Fatal("Missing Polka API key")
+	}
+
 	isProduction := os.Getenv("PLATFORM") != "dev"
 
 	// Set up database
@@ -807,6 +829,9 @@ func main() {
 		isProduction:   isProduction,
 		fileserverHits: atomic.Uint32{},
 		jwtSecret:      secret.New(jwtSecret),
+		apiKeys: ApiKeys{
+			Polka: polkaApiKey,
+		},
 	}
 
 	// Set up server multiplexer
