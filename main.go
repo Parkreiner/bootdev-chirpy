@@ -36,10 +36,11 @@ type UserCredentials struct {
 }
 
 type UserResponse struct {
-	Id        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	Id          uuid.UUID `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 type UserResponseWithTokens struct {
@@ -212,10 +213,11 @@ func (c *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bytes, err := json.Marshal(UserResponse{
-		Id:        newDbUser.ID,
-		CreatedAt: newDbUser.CreatedAt,
-		UpdatedAt: newDbUser.UpdatedAt,
-		Email:     newDbUser.Email,
+		Id:          newDbUser.ID,
+		CreatedAt:   newDbUser.CreatedAt,
+		UpdatedAt:   newDbUser.UpdatedAt,
+		Email:       newDbUser.Email,
+		IsChirpyRed: newDbUser.IsChirpyRed,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -470,10 +472,11 @@ func (c *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		Token:        accessToken,
 		RefreshToken: refreshTokenEntry.Token,
 		UserResponse: UserResponse{
-			Id:        dbUser.ID,
-			UpdatedAt: dbUser.UpdatedAt,
-			CreatedAt: dbUser.CreatedAt,
-			Email:     dbUser.Email,
+			Id:          dbUser.ID,
+			UpdatedAt:   dbUser.UpdatedAt,
+			CreatedAt:   dbUser.CreatedAt,
+			Email:       dbUser.Email,
+			IsChirpyRed: dbUser.IsChirpyRed,
 		},
 	})
 	if err != nil {
@@ -658,10 +661,11 @@ func (c *apiConfig) updateLoginCredentials(
 	}
 
 	bytes, err := json.Marshal(UserResponse{
-		Id:        updatedUser.ID,
-		Email:     updatedUser.Email,
-		CreatedAt: updatedUser.CreatedAt,
-		UpdatedAt: updatedUser.UpdatedAt,
+		Id:          updatedUser.ID,
+		Email:       updatedUser.Email,
+		CreatedAt:   updatedUser.CreatedAt,
+		UpdatedAt:   updatedUser.UpdatedAt,
+		IsChirpyRed: updatedUser.IsChirpyRed,
 	})
 	if err != nil {
 		log.Printf(
@@ -725,6 +729,52 @@ func (c *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Deleted chirp %s. Chirp body: %v\n", chirpUuid, deletedChirp)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (c *apiConfig) upgradeUserSubscription(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	type PolkaWebhookData struct {
+		UserId string `json:"user_id"`
+	}
+
+	type PolkaWebhookRequest struct {
+		Event string           `json:"event"`
+		Data  PolkaWebhookData `json:"data"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	payload := PolkaWebhookRequest{}
+	err := decoder.Decode(&payload)
+	if err != nil {
+		log.Printf("Unable to parse request. Error: %v\n", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if payload.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	userId, err := uuid.Parse(payload.Data.UserId)
+	if err != nil {
+		log.Printf("Unable to parse user ID from event. Error: %v\n", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	_, err = c.queries.UpgradeUserSubscriptionStatus(r.Context(), userId)
+	if err == sql.ErrNoRows {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if err != nil {
+		log.Printf("Unable to upgrade user %s. Error %v\n", userId, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -794,6 +844,9 @@ func main() {
 	// Admin-only routes
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetAll)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.adminMetrics)
+
+	// Webhooks
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.upgradeUserSubscription)
 
 	log.Fatal(server.ListenAndServe())
 }
